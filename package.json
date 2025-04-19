@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.4",
+    "ol": "^10.5.0",
     "solid-js": "^1.9.5",
     "tailwindcss": "^4.1.4"
   }
