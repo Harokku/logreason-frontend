@@ -39,3 +39,4 @@ logs
 # Misc
 .junie
 Thumbs.db
+datafiles/*
