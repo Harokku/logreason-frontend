@@ -9,6 +9,7 @@ import {fromLonLat} from 'ol/proj';
 import 'ol/ol.css';
 import {applyPolygonColors, getPolygonStyleFunction, getMarkerStyle} from '../utils/colorUtils';
 import MapService from '../services/MapService';
+import DataService from '../services/DataService';
 
 /**
  * Map component that displays OpenLayers map with GeoJSON polygons and location markers
@@ -71,62 +72,94 @@ function Map() {
         }
     });
 
-    // Load GeoJSON data from environment variable
+    // Load GeoJSON data from backend API
     const loadGeoJSONData = async () => {
         try {
-            const geojsonPath = import.meta.env.VITE_GEOJSON_PATH;
+            // Array to store all GeoJSON content for cache validation
+            const allGeojsonContents = [];
+            // Array to store all features from all GeoJSON files
+            const allFeatures = [];
 
-            if (!geojsonPath) {
-                console.error('VITE_GEOJSON_PATH environment variable is not set');
+            // Fetch all GeoJSON data from the backend API
+            const geojsonDataArray = await DataService.fetchAllGeoJSON();
+
+            if (!geojsonDataArray || !Array.isArray(geojsonDataArray)) {
+                console.error('Invalid GeoJSON data received from backend');
                 return;
             }
 
-            const response = await fetch(geojsonPath);
-            const geojsonData = await response.json();
-            const geojsonContent = JSON.stringify(geojsonData);
+            if (geojsonDataArray.length === 0) {
+                console.warn('No GeoJSON data received from backend');
+                return;
+            }
+
+            // Process each GeoJSON object
+            for (const geojsonData of geojsonDataArray) {
+                try {
+                    const geojsonContent = JSON.stringify(geojsonData);
+
+                    // Add to the array of GeoJSON contents for cache validation
+                    allGeojsonContents.push(geojsonContent);
+
+                    if (geojsonSource()) {
+                        const geoJsonFormat = new GeoJSON();
+                        const features = geoJsonFormat.readFeatures(geojsonData, {
+                            featureProjection: 'EPSG:3857'
+                        });
+
+                        // Add features to the array of all features
+                        allFeatures.push(...features);
+                    }
+                } catch (parseError) {
+                    console.error(`Error processing GeoJSON data:`, parseError);
+                }
+            }
 
             // Update geojsonFiles for cache validation
-            setGeojsonFiles([...geojsonFiles(), geojsonContent]);
+            setGeojsonFiles([...geojsonFiles(), ...allGeojsonContents]);
 
-            if (geojsonSource()) {
-                const geoJsonFormat = new GeoJSON();
-                const features = geoJsonFormat.readFeatures(geojsonData, {
-                    featureProjection: 'EPSG:3857'
-                });
-
+            if (geojsonSource() && allFeatures.length > 0) {
                 // Apply polygon colors using the utility function
-                applyPolygonColors(features, geojsonFiles());
+                applyPolygonColors(allFeatures, geojsonFiles());
 
-                geojsonSource().addFeatures(features);
+                // Add all features to the source
+                geojsonSource().addFeatures(allFeatures);
 
                 // Fit map to GeoJSON extent
-                if (map() && features.length > 0) {
+                if (map()) {
                     map().getView().fit(geojsonSource().getExtent(), {
                         padding: [50, 50, 50, 50],
                         maxZoom: 16
                     });
                 }
+            } else {
+                console.warn('No valid features found in GeoJSON data');
             }
         } catch (error) {
             console.error('Error loading GeoJSON data:', error);
+            // You could add UI notification here for better user experience
         }
     };
 
-    // Load CSV data from environment variable
+    // Load CSV data from backend API
     const loadCSVData = async () => {
         try {
-            const csvPath = import.meta.env.VITE_CSV_PATH;
+            // Fetch CSV data from the backend API
+            const csvText = await DataService.fetchCSVData();
 
-            if (!csvPath) {
-                console.error('VITE_CSV_PATH environment variable is not set');
+            if (!csvText || typeof csvText !== 'string' || csvText.trim() === '') {
+                console.error('Invalid or empty CSV data received from backend');
                 return;
             }
 
-            const response = await fetch(csvPath);
-            const csvText = await response.text();
-
             // Parse CSV
             const lines = csvText.split('\r\n');
+
+            if (lines.length < 2) {
+                console.warn('CSV data contains no records (only headers or empty)');
+                return;
+            }
+
             const headers = lines[0].split(',');
 
             // Find column indices
@@ -135,23 +168,34 @@ function Map() {
             const lonIndex = headers.findIndex(h => h.toLowerCase() === 'lon');
 
             if (locationIndex === -1 || latIndex === -1 || lonIndex === -1) {
-                console.error('CSV must contain location, latitude, and longitude columns');
+                console.error('CSV must contain location (stazionamento), latitude (lat), and longitude (lon) columns');
                 return;
             }
 
             // Create features for each location
             const geoJsonFormat = new GeoJSON();
             const features = [];
+            let invalidRecords = 0;
 
             for (let i = 1; i < lines.length; i++) {
                 if (!lines[i].trim()) continue;
 
                 const values = lines[i].split(',');
+
+                // Check if we have enough values
+                if (values.length <= Math.max(locationIndex, latIndex, lonIndex)) {
+                    invalidRecords++;
+                    continue;
+                }
+
                 const location = values[locationIndex];
                 const lat = parseFloat(values[latIndex]);
                 const lon = parseFloat(values[lonIndex]);
 
-                if (isNaN(lat) || isNaN(lon)) continue;
+                if (isNaN(lat) || isNaN(lon)) {
+                    invalidRecords++;
+                    continue;
+                }
 
                 const feature = geoJsonFormat.readFeature({
                     type: 'Feature',
@@ -169,11 +213,22 @@ function Map() {
                 features.push(feature);
             }
 
+            if (invalidRecords > 0) {
+                console.warn(`Skipped ${invalidRecords} invalid records in CSV data`);
+            }
+
+            if (features.length === 0) {
+                console.warn('No valid location features found in CSV data');
+                return;
+            }
+
             if (markersSource()) {
                 markersSource().addFeatures(features);
+                console.log(`Added ${features.length} location markers to the map`);
             }
         } catch (error) {
             console.error('Error loading CSV data:', error);
+            // You could add UI notification here for better user experience
         }
     };
 
